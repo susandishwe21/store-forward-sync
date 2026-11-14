@@ -1,26 +1,31 @@
 //Sync status of a record.
-enum SyncStatus {
-  //Saved on the phone
-  queued,
-  //Sent to the server
-  sending,
-  //Received by the server
-  confirmed,
-}
+enum SyncStatus { queued, sending, retryScheduled, sentUnconfirmed, confirmed }
 
 //Sync events that can be sent to the server.
 enum SyncEvent {
-  //Sync engine picked this record to send.
   batchBuilt,
-  //Server replied: "applied"
   ackApplied,
+  transientError,
+  backoffElapsed,
+  ambiguousResponse,
+  appRestarted,
+  statusApplied,
+  statusUnknown,
 }
 
-//
+//rules
 SyncStatus? transition(SyncStatus? from, SyncEvent event) {
   return switch ((from, event)) {
     (SyncStatus.queued, SyncEvent.batchBuilt) => SyncStatus.sending,
     (SyncStatus.sending, SyncEvent.ackApplied) => SyncStatus.confirmed,
+    (SyncStatus.sending, SyncEvent.transientError) => SyncStatus.retryScheduled,
+    (SyncStatus.retryScheduled, SyncEvent.backoffElapsed) => SyncStatus.queued,
+    (SyncStatus.sending, SyncEvent.ambiguousResponse) =>
+      SyncStatus.sentUnconfirmed,
+    (SyncStatus.sending, SyncEvent.appRestarted) => SyncStatus.sentUnconfirmed,
+    (SyncStatus.sentUnconfirmed, SyncEvent.statusApplied) =>
+      SyncStatus.confirmed,
+    (SyncStatus.sentUnconfirmed, SyncEvent.statusUnknown) => SyncStatus.queued,
     _ => null,
   };
 }
