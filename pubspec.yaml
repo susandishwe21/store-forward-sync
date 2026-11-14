@@ -6,5 +6,6 @@ environment:
 
 workspace:
   - packages/sf_contracts
+  - packages/sf_local
 dependencies:
   crypto: ^3.0.8
