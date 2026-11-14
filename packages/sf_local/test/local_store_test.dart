@@ -11,7 +11,10 @@ void main() {
 
   test('opening a new database creates the three tables', () {
     final store = LocalStore.open('${dir.path}/store.db');
-    expect(store.tableNames(), containsAll(['sf_meta', 'sf_outbox', 'sf_record']));
+    expect(
+      store.tableNames(),
+      containsAll(['sf_meta', 'sf_outbox', 'sf_record']),
+    );
     store.close();
   });
 
