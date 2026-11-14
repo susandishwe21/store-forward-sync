@@ -1,0 +1,8 @@
+name: store_forward_sync_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+workspace:
+  - packages/sf_contracts
