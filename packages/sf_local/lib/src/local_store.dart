@@ -1,11 +1,23 @@
 import 'package:sf_contracts/sf_contracts.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'dart:convert';
-
+import 'validation.dart';
 import 'local_record.dart';
 
 final class LocalStore {
   LocalStore._(this._db, this.clientId);
+  final Map<String, RecordValidator> _validators = {};
+
+  void registerValidator(String entityType, RecordValidator validator) {
+    _validators[entityType] = validator;
+  }
+
+  void validate(String entityType, Map<String, Object?> payload) {
+    final validator = _validators[entityType];
+    if (validator == null) return; // no rules for this type
+    final problems = validator(payload);
+    if (problems.isNotEmpty) throw ValidationException(entityType, problems);
+  }
 
   factory LocalStore.open(String path) {
     final db = path == ':memory:' ? sqlite3.openInMemory() : sqlite3.open(path);
@@ -15,34 +27,32 @@ final class LocalStore {
 
     _createTables(db);
     final clientId = _loadOrCreateClientId(db);
-    return LocalStore._(db, clientId);
+    final store = LocalStore._(db, clientId);
+    store.recoverAfterRestart();
+    return store;
   }
 
   final Database _db;
-
-  /// A permanent ID for this device's database. The server uses it, together
-  /// with each opId, to recognise duplicates.
   final String clientId;
 
-  /// Creates a new record with a fresh ID. Saved on the device when this returns.
   LocalRecord create(String entityType, Map<String, Object?> payload) =>
       put(entityType, newUuidV7(), payload);
 
-  /// Creates or replaces the record [entityId].
   LocalRecord put(
     String entityType,
     String entityId,
     Map<String, Object?> payload,
-  ) => _transaction(
-    () => _write(entityType, entityId, payload, deleting: false),
-  );
+  ) {
+    validate(entityType, payload);
+    return _transaction(
+      () => _write(entityType, entityId, payload, deleting: false),
+    );
+  }
 
-  /// Deletes a record. It stays as a "tombstone" until the server confirms.
   LocalRecord delete(String entityType, String entityId) => _transaction(
     () => _write(entityType, entityId, const {}, deleting: true),
   );
 
-  /// Reads one record. Returns null if it does not exist or is deleted.
   LocalRecord? get(
     String entityType,
     String entityId, {
@@ -53,28 +63,38 @@ final class LocalStore {
       [entityType, entityId],
     );
     if (rows.isEmpty) return null;
-    final row = rows.first;
-    final deleted = row['deleted'] == 1;
-    if (deleted && !includeDeleted) return null;
+    final record = _toRecord(rows.first);
+    if (record.deleted && !includeDeleted) return null;
+    return record;
+  }
+
+  List<LocalRecord> query(String entityType, {bool includeDeleted = false}) {
+    final rows = _db.select(
+      'SELECT * FROM sf_record WHERE entity_type = ? AND (deleted = 0 OR ?) '
+      'ORDER BY entity_id',
+      [entityType, includeDeleted ? 1 : 0],
+    );
+    return rows.map(_toRecord).toList();
+  }
+
+  LocalRecord _toRecord(Row row) {
     final payload = row['payload'] as String?;
     return LocalRecord(
-      entityType: entityType,
-      entityId: entityId,
+      entityType: row['entity_type'] as String,
+      entityId: row['entity_id'] as String,
       payload: payload == null
           ? null
           : (jsonDecode(payload) as Map).cast<String, Object?>(),
-      deleted: deleted,
+      deleted: row['deleted'] == 1,
       syncStatus: SyncStatus.values.byName(row['sync_status'] as String),
       localSeq: row['local_seq'] as int,
       savedAt: DateTime.fromMillisecondsSinceEpoch(row['saved_at'] as int),
     );
   }
 
-  /// How many changes are in the outbox.
   int operationCount() =>
       _db.select('SELECT COUNT(*) AS n FROM sf_outbox').first['n'] as int;
 
-  /// Runs [body] as one transaction: everything is saved, or nothing is.
   T _transaction<T>(T Function() body) {
     _db.execute('BEGIN IMMEDIATE');
     try {
@@ -87,7 +107,6 @@ final class LocalStore {
     }
   }
 
-  /// Writes the record AND its outbox entry. Must run inside _transaction.
   LocalRecord _write(
     String entityType,
     String entityId,
@@ -211,5 +230,28 @@ final class LocalStore {
       id,
     ]);
     return id;
+  }
+
+  void recoverAfterRestart() {
+    final next = transition(SyncStatus.sending, SyncEvent.appRestarted);
+    if (next == null) {
+      throw StateError('State machine has no rule for sending + appRestarted');
+    }
+    _db.execute('UPDATE sf_outbox SET status = ? WHERE status = ?', [
+      next.name,
+      SyncStatus.sending.name,
+    ]);
+  }
+
+  Map<SyncStatus, int> outboxSummary() {
+    final counts = {for (final s in SyncStatus.values) s: 0};
+    final rows = _db.select(
+      'SELECT status, COUNT(*) AS n FROM sf_outbox GROUP BY status',
+    );
+    for (final row in rows) {
+      counts[SyncStatus.values.byName(row['status'] as String)] =
+          row['n'] as int;
+    }
+    return counts;
   }
 }

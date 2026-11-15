@@ -5,5 +5,4 @@ library;
 
 export 'src/local_store.dart';
 export 'src/local_record.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/validation.dart';
