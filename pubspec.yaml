@@ -8,6 +8,7 @@ workspace:
   - packages/sf_contracts
   - packages/sf_local
   - packages/sf_server
-  
+  - packages/sf_sync
+
 dependencies:
   crypto: ^3.0.8

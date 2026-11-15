@@ -1,0 +1,21 @@
+name: sf_sync
+description: Sends the local outbox to a store-and-forward sync server.
+version: 1.0.0
+publish_to: none
+resolution: workspace
+# repository: https://github.com/my_org/my_repo
+
+environment:
+  sdk: ^3.12.2
+
+# Add regular dependencies here.
+dependencies:
+  sf_contracts:
+    path: ../sf_contracts
+  # path: ^1.9.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  sf_server:
+    path: ../sf_server
+  test: ^1.25.6
