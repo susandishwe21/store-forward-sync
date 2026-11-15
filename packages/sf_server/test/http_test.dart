@@ -18,58 +18,41 @@ void main() {
     store.close();
   });
 
-  /// Sends a real HTTP request and returns (status code, JSON body).
-  Future<(int, Map<String, Object?>)> send(
-    String method,
-    String path, [
-    Object? body,
-  ]) async {
+  Future<(int, Map<String, Object?>)> send(String method, String path, [Object? body]) async {
     final client = HttpClient();
     try {
-      final req = await client.openUrl(
-        method,
-        Uri.parse('http://127.0.0.1:${server.port}$path'),
-      );
+      final req = await client.openUrl(method, Uri.parse('http://127.0.0.1:${server.port}$path'));
       if (body != null) {
         req.headers.contentType = ContentType.json;
         req.write(body is String ? body : jsonEncode(body));
       }
       final res = await req.close();
       final text = await utf8.decoder.bind(res).join();
-      return (
-        res.statusCode,
-        (jsonDecode(text) as Map).cast<String, Object?>(),
-      );
+      return (res.statusCode, (jsonDecode(text) as Map).cast<String, Object?>());
     } finally {
       client.close();
     }
   }
 
-  Map<String, Object?> op(
-    String opId,
-    String entityId,
-    Map<String, Object?> payload, {
-    String? hash,
-  }) => PushOp(
-    opId: opId,
-    entityType: 'note',
-    entityId: entityId,
-    seq: 1,
-    opType: 'create',
-    payload: payload,
-    payloadHash: hash ?? payloadHash(payload),
-  ).toJson();
+  Map<String, Object?> op(String opId, String entityId, Map<String, Object?> payload,
+          {String? hash}) =>
+      PushOp(
+        opId: opId,
+        entityType: 'note',
+        entityId: entityId,
+        seq: 1,
+        opType: 'create',
+        payload: payload,
+        payloadHash: hash ?? payloadHash(payload),
+      ).toJson();
 
-  Map<String, Object?> batch(List<Map<String, Object?>> ops) => {
-    'sfsp': sfspVersion,
-    'clientId': 'phone-A',
-    'ops': ops,
-  };
+  Map<String, Object?> batch(List<Map<String, Object?>> ops) =>
+      {'sfsp': sfspVersion, 'clientId': 'phone-A', 'ops': ops};
 
   List<PushResult> resultsOf(Map<String, Object?> json) => [
-    for (final r in json['replies'] as List)
-      PushReply.fromJson((r as Map).cast<String, Object?>()).result,
-  ];
+        for (final r in json['replies'] as List)
+          PushReply.fromJson((r as Map).cast<String, Object?>()).result,
+      ];
 
   final threeChanges = [
     op('op1', 'n1', {'title': 'A'}),
@@ -84,42 +67,21 @@ void main() {
   });
 
   test('each change in a batch gets its own reply', () async {
-    final (status, json) = await send(
-      'POST',
-      '/sync/push',
-      batch(threeChanges),
-    );
+    final (status, json) = await send('POST', '/sync/push', batch(threeChanges));
     expect(status, 200);
-    expect(resultsOf(json), [
-      PushResult.applied,
-      PushResult.rejected,
-      PushResult.applied,
-    ]);
+    expect(resultsOf(json), [PushResult.applied, PushResult.rejected, PushResult.applied]);
   });
 
   test('resending the whole batch is safe', () async {
     await send('POST', '/sync/push', batch(threeChanges));
     final (_, json) = await send('POST', '/sync/push', batch(threeChanges));
-    expect(resultsOf(json), [
-      PushResult.duplicate,
-      PushResult.rejected,
-      PushResult.duplicate,
-    ]);
+    expect(resultsOf(json), [PushResult.duplicate, PushResult.rejected, PushResult.duplicate]);
   });
 
   test('status tells the phone which changes the server has', () async {
-    await send(
-      'POST',
-      '/sync/push',
-      batch([
-        op('op1', 'n1', {'title': 'A'}),
-      ]),
-    );
-    final (status, json) = await send('POST', '/sync/ops/status', {
-      'sfsp': sfspVersion,
-      'clientId': 'phone-A',
-      'opIds': ['op1', 'never-sent'],
-    });
+    await send('POST', '/sync/push', batch([op('op1', 'n1', {'title': 'A'})]));
+    final (status, json) = await send('POST', '/sync/ops/status',
+        {'sfsp': sfspVersion, 'clientId': 'phone-A', 'opIds': ['op1', 'never-sent']});
     expect(status, 200);
     final statuses = [
       for (final s in json['statuses'] as List)
@@ -146,11 +108,8 @@ void main() {
   });
 
   test('an unknown protocol version is refused', () async {
-    final (status, json) = await send('POST', '/sync/push', {
-      'sfsp': 99,
-      'clientId': 'phone-A',
-      'ops': <Object>[],
-    });
+    final (status, json) = await send('POST', '/sync/push',
+        {'sfsp': 99, 'clientId': 'phone-A', 'ops': <Object>[]});
     expect(status, 400);
     expect(json['error'], contains('version'));
   });

@@ -1,7 +1,8 @@
 name: sf_local
-description: A starting point for Dart libraries or applications.
+description: Offline-first local storage with a transactional outbox.
 version: 1.0.0
 publish_to: none
+resolution: workspace
 # repository: https://github.com/my_org/my_repo
 
 environment:
@@ -9,7 +10,6 @@ environment:
 
 # Add regular dependencies here.
 dependencies:
-  #path: ^1.9.0
   sf_contracts:
     path: ../sf_contracts
   sqlite3: ^2.4.0
