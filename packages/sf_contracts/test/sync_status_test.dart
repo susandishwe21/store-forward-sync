@@ -72,4 +72,14 @@ void main() {
       SyncStatus.sentUnconfirmed,
     );
   });
+
+  test('a permanent error ends in rejected, and rejected is final', () {
+    expect(
+      transition(SyncStatus.sending, SyncEvent.permanentError),
+      SyncStatus.rejected,
+    );
+    for (final event in SyncEvent.values) {
+      expect(transition(SyncStatus.rejected, event), isNull);
+    }
+  });
 }

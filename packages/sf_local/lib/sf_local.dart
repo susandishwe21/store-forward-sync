@@ -6,3 +6,4 @@ library;
 export 'src/local_store.dart';
 export 'src/local_record.dart';
 export 'src/validation.dart';
+export 'src/outbox_entry.dart';

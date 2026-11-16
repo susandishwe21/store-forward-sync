@@ -1,5 +1,12 @@
 //Sync status of a record.
-enum SyncStatus { queued, sending, retryScheduled, sentUnconfirmed, confirmed }
+enum SyncStatus {
+  queued,
+  sending,
+  retryScheduled,
+  sentUnconfirmed,
+  confirmed,
+  rejected,
+}
 
 //Sync events that can be sent to the server.
 enum SyncEvent {
@@ -11,6 +18,7 @@ enum SyncEvent {
   appRestarted,
   statusApplied,
   statusUnknown,
+  permanentError,
 }
 
 //rules
@@ -26,6 +34,7 @@ SyncStatus? transition(SyncStatus? from, SyncEvent event) {
     (SyncStatus.sentUnconfirmed, SyncEvent.statusApplied) =>
       SyncStatus.confirmed,
     (SyncStatus.sentUnconfirmed, SyncEvent.statusUnknown) => SyncStatus.queued,
+    (SyncStatus.sending, SyncEvent.permanentError) => SyncStatus.rejected,
     _ => null,
   };
 }
