@@ -1,7 +1,6 @@
 import 'dart:math';
 
 import 'package:sf_sync/sf_sync.dart';
-import 'package:sf_sync/src/sync_policy.dart';
 import 'package:test/test.dart';
 
 void main() {
