@@ -10,7 +10,7 @@ Future<void> main(List<String> args) async {
   final engine = SyncEngine(
     store: store,
     transport: transport,
-    retryDelay: const Duration(seconds: 5),
+    backoff: fixedBackoff(const Duration(seconds: 5)),
   );
 
   final note = store.create('note', {'title': 'Saved at ${DateTime.now()}'});

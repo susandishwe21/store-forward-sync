@@ -1,10 +1,12 @@
 import 'package:sf_contracts/sf_contracts.dart';
 import 'package:sf_local/sf_local.dart';
 
+import 'backoff.dart';
 import 'send_failure.dart';
+import 'sync_policy.dart';
 import 'transport.dart';
 
-/// What one sync round did.
+/// What one sync round (or several added together) did.
 final class SyncReport {
   const SyncReport({
     this.confirmed = 0,
@@ -29,30 +31,67 @@ final class SyncReport {
   /// Why the round stopped early, if it did.
   final SendFailure? failure;
 
+  /// True when the round found nothing to do.
+  bool get isEmpty =>
+      confirmed == 0 && retryLater == 0 && unsure == 0 && rejected == 0;
+
+  /// Two reports added together.
+  SyncReport operator +(SyncReport other) => SyncReport(
+    confirmed: confirmed + other.confirmed,
+    retryLater: retryLater + other.retryLater,
+    unsure: unsure + other.unsure,
+    rejected: rejected + other.rejected,
+    failure: other.failure ?? failure,
+  );
+
   @override
   String toString() =>
       'confirmed=$confirmed retryLater=$retryLater '
       'unsure=$unsure rejected=$rejected${failure == null ? '' : ' ($failure)'}';
 }
 
-/// Moves changes from the local outbox to the server, one round at a time.
+/// Moves changes from the local outbox to the server.
 final class SyncEngine {
   SyncEngine({
     required this.store,
     required this.transport,
     this.batchSize = 100,
-    this.retryDelay = const Duration(seconds: 30),
+    BackoffStrategy? backoff,
     DateTime Function()? clock,
-  }) : _clock = clock ?? DateTime.now;
+  }) : _backoff = backoff ?? fullJitterBackoff(),
+       _clock = clock ?? DateTime.now;
 
   final LocalStore store;
   final SyncTransport transport;
   final int batchSize;
-
-  /// How long to wait before resending (a fixed delay for now; backoff comes next lesson).
-  final Duration retryDelay;
+  final BackoffStrategy _backoff;
   final DateTime Function() _clock;
   bool _running = false;
+  int _failures = 0;
+
+  /// How many rounds in a row failed to reach the server. 0 means healthy.
+  int get consecutiveFailures => _failures;
+
+  /// How long the app should wait before trying again, given recent failures.
+  Duration suggestedWait() =>
+      _failures == 0 ? Duration.zero : _backoff(_failures);
+
+  /// Runs rounds until nothing is ready to send, a round fails, or [maxRounds]
+  /// is reached. Returns null WITHOUT touching the network when [policy] says no.
+  Future<SyncReport?> syncAll({
+    SyncPolicy policy = syncAlways,
+    SyncContext? context,
+    int maxRounds = 50,
+  }) async {
+    if (!policy(context ?? SyncContext(now: _clock()))) return null;
+    var total = const SyncReport();
+    for (var i = 0; i < maxRounds; i++) {
+      final round = await syncOnce();
+      total = total + round;
+      if (round.failure != null || round.isEmpty) break;
+    }
+    return total;
+  }
 
   /// Runs one sync round. Only one round may run at a time.
   Future<SyncReport> syncOnce() async {
@@ -86,9 +125,11 @@ final class SyncEngine {
       try {
         answers = await transport.status(store.clientId, asked.toList());
       } on SendFailure catch (failure) {
+        _failures++;
         unsure = unsureOps.length;
         return report(failure); // still unsure: ask again next round
       }
+      _failures = 0;
       final applied = [
         for (final a in answers)
           if (asked.contains(a.opId) && a.applied) a,
@@ -121,14 +162,16 @@ final class SyncEngine {
         for (final op in batch) op.toPushOp(),
       ]);
     } on NotDelivered catch (failure) {
+      _failures++;
       store.applyEvent(
         SyncEvent.transientError,
         ids,
-        retryAt: _clock().add(retryDelay),
+        retryAt: _clock().add(_backoff(_failures)),
       );
       retryLater += ids.length;
       return report(failure);
     } on DeliveryUnknown catch (failure) {
+      _failures++;
       store.applyEvent(SyncEvent.ambiguousResponse, ids);
       unsure += ids.length;
       return report(failure);
@@ -143,6 +186,7 @@ final class SyncEngine {
       store.applyEvent(SyncEvent.ambiguousResponse, ids);
       rethrow;
     }
+    _failures = 0; // the server answered: the network is healthy again
 
     // ── Step 4: apply each change's own reply. ──
     final byId = {for (final r in replies) r.opId: r};
@@ -156,8 +200,10 @@ final class SyncEngine {
       switch (reply?.result) {
         case PushResult.applied || PushResult.duplicate:
           acked.add(op.opId);
-          if (reply!.serverVersion != null)
-            versions[op.opId] = reply.serverVersion!;
+          final version = reply!.serverVersion;
+          if (version != null) {
+            versions[op.opId] = version;
+          }
         case PushResult.outOfOrder:
           later.add(op.opId);
         case PushResult.rejected:
@@ -170,7 +216,7 @@ final class SyncEngine {
     store.applyEvent(
       SyncEvent.transientError,
       later,
-      retryAt: _clock().add(retryDelay),
+      retryAt: _clock().add(_backoff(1)),
     );
     store.applyEvent(SyncEvent.permanentError, refused);
     store.applyEvent(SyncEvent.ambiguousResponse, missing);

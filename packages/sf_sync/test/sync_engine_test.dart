@@ -61,8 +61,12 @@ void main() {
   late SyncEngine engine;
   var now = DateTime(2026, 11, 16, 9);
 
-  SyncEngine engineFor(LocalStore store) =>
-      SyncEngine(store: store, transport: transport, clock: () => now);
+  SyncEngine engineFor(LocalStore store) => SyncEngine(
+    store: store,
+    transport: transport,
+    clock: () => now,
+    backoff: fixedBackoff(const Duration(seconds: 30)),
+  );
 
   setUp(() {
     dir = Directory.systemTemp.createTempSync('sf_engine_test');
@@ -208,4 +212,69 @@ void main() {
       await http.close();
     }
   });
+
+  test('syncAll keeps going until the outbox is empty', () async {
+    for (var i = 0; i < 250; i++) {
+      phone.create('note', {'n': i});
+    }
+    final report = await engine.syncAll();
+    expect(report!.confirmed, 250);
+    expect(transport.pushCalls, 3); // batches of 100 + 100 + 50
+  });
+
+  test('syncAll stops at the first failure', () async {
+    for (var i = 0; i < 3; i++) {
+      phone.create('note', {'n': i});
+    }
+    transport.failNextPush = const NotDelivered('no signal');
+    final report = await engine.syncAll();
+    expect(report!.failure, isA<NotDelivered>());
+    expect(transport.pushCalls, 1); // did not hammer a dead network
+  });
+
+  test('a policy that says no means no network use at all', () async {
+    final id = phone.create('note', {'title': 'A'}).entityId;
+    final report = await engine.syncAll(
+      policy: syncWindow(fromHour: 22, toHour: 5),
+      context: SyncContext(now: DateTime(2026, 11, 16, 12)),
+    );
+    expect(report, isNull);
+    expect(transport.pushCalls, 0);
+    expect(
+      phone.get('note', id)!.syncStatus,
+      SyncStatus.queued,
+    ); // safe on the phone
+  });
+
+  test(
+    'backoff grows with each failed round and resets after success',
+    () async {
+      final seen = <int>[];
+      final e = SyncEngine(
+        store: phone,
+        transport: transport,
+        clock: () => now,
+        backoff: (failures) {
+          seen.add(failures);
+          return const Duration(seconds: 10);
+        },
+      );
+      phone.create('note', {'title': 'A'});
+
+      transport.failNextPush = const NotDelivered('down');
+      await e.syncOnce();
+      now = now.add(const Duration(seconds: 11));
+      transport.failNextPush = const NotDelivered('still down');
+      await e.syncOnce();
+      expect(seen, [
+        1,
+        2,
+      ]); // the second wait was chosen for "2 failures in a row"
+      expect(e.consecutiveFailures, 2);
+
+      now = now.add(const Duration(seconds: 11));
+      await e.syncOnce(); // the network is back
+      expect(e.consecutiveFailures, 0);
+    },
+  );
 }
