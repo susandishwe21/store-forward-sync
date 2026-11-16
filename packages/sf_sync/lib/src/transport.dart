@@ -95,10 +95,12 @@ final class HttpTransport implements SyncTransport {
       throw DeliveryUnknown('no complete answer: $e');
     }
 
-    if (statusCode == 400)
+    if (statusCode == 400) {
       throw RequestRejected('server refused the request: $text');
-    if (statusCode != 200)
+    }
+    if (statusCode != 200) {
       throw DeliveryUnknown('server answered HTTP $statusCode');
+    }
     return _read(() => (jsonDecode(text) as Map).cast<String, Object?>());
   }
 }
