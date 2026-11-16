@@ -1,0 +1,10 @@
+policy,threshold,mean_exposure_min,radio_seconds,failed_requests,requests,safe
+eager,,15.83,19839.9,1387.2,1724.0,true
+learned,0.2,15.90,3956.8,248.2,579.8,true
+learned,0.3,15.96,2841.2,159.6,485.6,true
+learned,0.4,16.01,2670.4,149.6,476.8,true
+learned,0.5,15.99,2495.4,138.2,464.4,true
+learned,0.6,16.26,2013.4,109.0,429.2,true
+learned,0.7,16.50,1718.2,89.0,406.0,true
+learned,0.8,16.76,1516.0,76.2,391.0,true
+learned,0.9,27.43,1142.4,53.0,310.2,true

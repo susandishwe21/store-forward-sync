@@ -106,5 +106,10 @@ model = {
     "coef": logreg.coef_[0].tolist(),
     "intercept": float(logreg.intercept_[0]),
 }
+sample = X_test[0]
+model["check"] = {
+    "features": sample.tolist(),
+    "probability": float(logreg.predict_proba(scaler.transform(sample.reshape(1, -1)))[0, 1]),
+}
 (ROOT / "ml" / "models" / "logreg.json").write_text(json.dumps(model, indent=2))
 print("\nWrote results/model_metrics.csv, results/roc_calibration.png, ml/models/logreg.json")
