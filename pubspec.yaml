@@ -9,6 +9,7 @@ workspace:
   - packages/sf_local
   - packages/sf_server
   - packages/sf_sync
+  - packages/sf_harness
 
 dependencies:
   crypto: ^3.0.8

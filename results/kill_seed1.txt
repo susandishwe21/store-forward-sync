@@ -1,0 +1,14 @@
+Kill test (seed 1)
+  kills          : 200
+  crashes        : 0
+  proxy faults   : 1165 failed, 1099 replies dropped
+  seconds        : 18
+  phone changes  : 11968
+  forgotten      : 0   (app was told "saved", phone does not have it)
+  lost           : 0   (never reached the server)
+  duplicates     : 0   (applied more than once)
+  out of order   : 0   (applied in the wrong order)
+  mismatches     : 0   (final data differs)
+  unconfirmed    : 0   (not confirmed at the end)
+  rejected       : 0
+  RESULT         : PASS

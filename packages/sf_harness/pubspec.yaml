@@ -1,0 +1,25 @@
+name: sf_harness
+description: A starting point for Dart libraries or applications.
+version: 1.0.0
+publish_to: none
+resolution: workspace
+# repository: https://github.com/my_org/my_repo
+
+environment:
+  sdk: ^3.12.2
+
+# Add regular dependencies here.
+dependencies:
+  sf_contracts:
+    path: ../sf_contracts
+  sf_local:
+    path: ../sf_local
+  sf_server:
+    path: ../sf_server
+  sf_sync:
+    path: ../sf_sync
+  sqlite3: ^2.4.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
