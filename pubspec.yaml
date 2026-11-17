@@ -10,6 +10,7 @@ workspace:
   - packages/sf_server
   - packages/sf_sync
   - packages/sf_harness
+  - apps/field_survey
 
 dependencies:
   crypto: ^3.0.8

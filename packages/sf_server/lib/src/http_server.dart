@@ -8,11 +8,9 @@ import 'server_store.dart';
 final class SyncHttpServer {
   SyncHttpServer._(this._http, this._store);
   static const maxBatchSize = 500;
-  static Future<SyncHttpServer> start(
-    ServerStore store, {
-    int port = 8080,
-  }) async {
-    final http = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    static Future<SyncHttpServer> start(ServerStore store,
+      {int port = 8080, InternetAddress? address}) async {
+    final http = await HttpServer.bind(address ?? InternetAddress.loopbackIPv4, port);
     final server = SyncHttpServer._(http, store);
     http.listen(server._handle);
     return server;
@@ -124,3 +122,5 @@ final class _BadRequest implements Exception {
   _BadRequest(this.message);
   final String message;
 }
+
+
