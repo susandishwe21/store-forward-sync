@@ -8,3 +8,4 @@ export 'src/sync_status.dart';
 export 'src/canonical.dart';
 export 'src/ids.dart';
 export 'src/protocol.dart';
+export 'src/pull.dart';

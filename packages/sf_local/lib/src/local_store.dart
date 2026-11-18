@@ -12,8 +12,15 @@ final class LocalStore {
   LocalStore._(this._db, this.clientId);
 
   /// Opens (or creates) the store at [path]. Use ':memory:' for a throwaway store.
-  factory LocalStore.open(String path) {
+  ///
+  /// With [encryptionKeyHex] (64 hex characters = 256 bits) the whole database
+  /// is encrypted with SQLCipher. If SQLCipher is not available, opening fails
+  /// instead of silently storing data unencrypted.
+  factory LocalStore.open(String path, {String? encryptionKeyHex}) {
     final db = path == ':memory:' ? sqlite3.openInMemory() : sqlite3.open(path);
+    if (encryptionKeyHex != null) {
+      _unlock(db, encryptionKeyHex); // must happen before ANY other statement
+    }
     db.execute('PRAGMA journal_mode = WAL');
     db.execute('PRAGMA synchronous = FULL');
     _createTables(db);
@@ -22,6 +29,27 @@ final class LocalStore {
     final store = LocalStore._(db, clientId);
     store._recoverAfterRestart();
     return store;
+  }
+
+  /// Turns on SQLCipher encryption with a raw 256-bit key.
+  static void _unlock(Database db, String keyHex) {
+    if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(keyHex)) {
+      db.dispose();
+      throw ArgumentError('encryptionKeyHex must be 64 hex characters (256 bits)');
+    }
+    // Plain SQLite does not know this pragma and returns no rows.
+    if (db.select('PRAGMA cipher_version').isEmpty) {
+      db.dispose();
+      throw StateError('SQLCipher is not available: refusing to store data unencrypted');
+    }
+    // x'...' = a raw key: no slow password derivation, because the key is already random.
+    db.execute("PRAGMA key = \"x'$keyHex'\"");
+    try {
+      db.select('SELECT count(*) FROM sqlite_master'); // fails if the key is wrong
+    } on SqliteException {
+      db.dispose();
+      throw StateError('Wrong encryption key, or the file is not encrypted with this key');
+    }
   }
 
   final Database _db;
@@ -45,34 +73,22 @@ final class LocalStore {
       put(entityType, newUuidV7(), payload);
 
   /// Creates or replaces the record [entityId].
-  LocalRecord put(
-    String entityType,
-    String entityId,
-    Map<String, Object?> payload,
-  ) {
+  LocalRecord put(String entityType, String entityId, Map<String, Object?> payload) {
     _validate(entityType, payload);
-    return _transaction(
-      () => _write(entityType, entityId, payload, deleting: false),
-    );
+    return _transaction(() => _write(entityType, entityId, payload, deleting: false));
   }
 
   /// Deletes a record. It stays as a "tombstone" until the server confirms.
-  LocalRecord delete(String entityType, String entityId) => _transaction(
-    () => _write(entityType, entityId, const {}, deleting: true),
-  );
+  LocalRecord delete(String entityType, String entityId) =>
+      _transaction(() => _write(entityType, entityId, const {}, deleting: true));
 
   // ───────────────────────────── Reads ──────────────────────────────
 
   /// Reads one record. Returns null if it does not exist or is deleted.
-  LocalRecord? get(
-    String entityType,
-    String entityId, {
-    bool includeDeleted = false,
-  }) {
+  LocalRecord? get(String entityType, String entityId, {bool includeDeleted = false}) {
     final rows = _db.select(
-      'SELECT * FROM sf_record WHERE entity_type = ? AND entity_id = ?',
-      [entityType, entityId],
-    );
+        'SELECT * FROM sf_record WHERE entity_type = ? AND entity_id = ?',
+        [entityType, entityId]);
     if (rows.isEmpty) return null;
     final record = _toRecord(rows.first);
     if (record.deleted && !includeDeleted) return null;
@@ -83,10 +99,9 @@ final class LocalStore {
   /// Deleted ones are hidden unless asked.
   List<LocalRecord> query(String entityType, {bool includeDeleted = false}) {
     final rows = _db.select(
-      'SELECT * FROM sf_record WHERE entity_type = ? AND (deleted = 0 OR ?) '
-      'ORDER BY rowid',
-      [entityType, includeDeleted ? 1 : 0],
-    );
+        'SELECT * FROM sf_record WHERE entity_type = ? AND (deleted = 0 OR ?) '
+        'ORDER BY rowid',
+        [entityType, includeDeleted ? 1 : 0]);
     return rows.map(_toRecord).toList();
   }
 
@@ -97,48 +112,37 @@ final class LocalStore {
   /// How many outbox entries are in each status.
   Map<SyncStatus, int> outboxSummary() {
     final counts = {for (final s in SyncStatus.values) s: 0};
-    final rows = _db.select(
-      'SELECT status, COUNT(*) AS n FROM sf_outbox GROUP BY status',
-    );
+    final rows = _db.select('SELECT status, COUNT(*) AS n FROM sf_outbox GROUP BY status');
     for (final row in rows) {
-      counts[SyncStatus.values.byName(row['status'] as String)] =
-          row['n'] as int;
+      counts[SyncStatus.values.byName(row['status'] as String)] = row['n'] as int;
     }
     return counts;
   }
 
   /// The names of all tables in the database (handy in tests).
   List<String> tableNames() => [
-    for (final row in _db.select(
-      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-    ))
-      row['name'] as String,
-  ];
+        for (final row in _db.select(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"))
+          row['name'] as String,
+      ];
 
   // ───────────────────── Outbox: the sending side ─────────────────────
 
   /// Picks up to [limit] changes that are ready to send, oldest first, and marks
   /// them `sending`. A change waits while an earlier change to the SAME record
   /// is still unresolved, so the server always receives a record's changes in order.
-  List<OutboxEntry> takeBatch({
-    int limit = 100,
-    DateTime? now,
-  }) => _transaction(() {
-    final nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+  List<OutboxEntry> takeBatch({int limit = 100, DateTime? now}) => _transaction(() {
+        final nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
 
-    // 1. Retries whose waiting time is over go back to the queue.
-    _db.execute(
-      'UPDATE sf_outbox SET status = ? WHERE status = ? AND next_attempt_at <= ?',
-      [
-        _next(SyncStatus.retryScheduled, SyncEvent.backoffElapsed).name,
-        SyncStatus.retryScheduled.name,
-        nowMs,
-      ],
-    );
+        _db.execute(
+            'UPDATE sf_outbox SET status = ? WHERE status = ? AND next_attempt_at <= ?',
+            [
+              _next(SyncStatus.retryScheduled, SyncEvent.backoffElapsed).name,
+              SyncStatus.retryScheduled.name,
+              nowMs,
+            ]);
 
-    // 2. The oldest queued changes whose earlier changes are all settled.
-    final rows = _db.select(
-      '''
+        final rows = _db.select('''
           SELECT o.* FROM sf_outbox o
           WHERE o.status = ?
             AND NOT EXISTS (
@@ -148,83 +152,59 @@ final class LocalStore {
                 AND p.seq < o.seq
                 AND p.status NOT IN (?, ?))
           ORDER BY o.rowid
-          LIMIT ?''',
-      [
-        SyncStatus.queued.name,
-        SyncStatus.queued.name,
-        SyncStatus.confirmed.name,
-        limit,
-      ],
-    );
+          LIMIT ?''', [
+          SyncStatus.queued.name,
+          SyncStatus.queued.name,
+          SyncStatus.confirmed.name,
+          limit,
+        ]);
 
-    // 3. Mark them as sending.
-    final sending = _next(SyncStatus.queued, SyncEvent.batchBuilt);
-    final batch = <OutboxEntry>[];
-    for (final row in rows) {
-      _db.execute(
-        'UPDATE sf_outbox SET status = ?, attempts = COALESCE(attempts, 0) + 1 '
-        'WHERE op_id = ?',
-        [sending.name, row['op_id']],
-      );
-      _refreshRecordStatus(
-        row['entity_type'] as String,
-        row['entity_id'] as String,
-      );
-      batch.add(
-        _toEntry(
-          row,
-          status: sending,
-          attempts: ((row['attempts'] as int?) ?? 0) + 1,
-        ),
-      );
-    }
-    return batch;
-  });
+        final sending = _next(SyncStatus.queued, SyncEvent.batchBuilt);
+        final batch = <OutboxEntry>[];
+        for (final row in rows) {
+          _db.execute(
+              'UPDATE sf_outbox SET status = ?, attempts = COALESCE(attempts, 0) + 1 '
+              'WHERE op_id = ?',
+              [sending.name, row['op_id']]);
+          _refreshRecordStatus(row['entity_type'] as String, row['entity_id'] as String);
+          batch.add(_toEntry(row,
+              status: sending, attempts: ((row['attempts'] as int?) ?? 0) + 1));
+        }
+        return batch;
+      });
 
   /// Applies [event] to every change in [opIds], all or nothing.
-  /// [retryAt] is required when the event schedules a retry.
-  /// [serverVersions] stores the server's version when a change is confirmed.
-  void applyEvent(
-    SyncEvent event,
-    List<String> opIds, {
-    DateTime? retryAt,
-    Map<String, int> serverVersions = const {},
-  }) {
+  void applyEvent(SyncEvent event, List<String> opIds,
+      {DateTime? retryAt, Map<String, int> serverVersions = const {}}) {
     _transaction(() {
       for (final opId in opIds) {
         final rows = _db.select(
-          'SELECT status, entity_type, entity_id FROM sf_outbox WHERE op_id = ?',
-          [opId],
-        );
+            'SELECT status, entity_type, entity_id FROM sf_outbox WHERE op_id = ?', [opId]);
         if (rows.isEmpty) throw StateError('Unknown change $opId');
         final entityType = rows.first['entity_type'] as String;
         final entityId = rows.first['entity_id'] as String;
 
         final from = SyncStatus.values.byName(rows.first['status'] as String);
-        final to = _next(from, event); // throws if the state machine forbids it
+        final to = _next(from, event);
         if (to == SyncStatus.retryScheduled && retryAt == null) {
           throw ArgumentError('retryAt is required for ${event.name}');
         }
 
         _db.execute(
-          'UPDATE sf_outbox SET status = ?, next_attempt_at = COALESCE(?, next_attempt_at) '
-          'WHERE op_id = ?',
-          [
-            to.name,
-            to == SyncStatus.retryScheduled
-                ? retryAt!.millisecondsSinceEpoch
-                : null,
-            opId,
-          ],
-        );
+            'UPDATE sf_outbox SET status = ?, next_attempt_at = COALESCE(?, next_attempt_at) '
+            'WHERE op_id = ?',
+            [
+              to.name,
+              to == SyncStatus.retryScheduled ? retryAt!.millisecondsSinceEpoch : null,
+              opId,
+            ]);
 
         final version = serverVersions[opId];
         if (to == SyncStatus.confirmed && version != null) {
           _db.execute(
-            'UPDATE sf_record SET server_version = MAX(COALESCE(server_version, 0), ?) '
-            'WHERE entity_type = ? AND entity_id = ?',
-            [version, entityType, entityId],
-          );
+              'UPDATE sf_record SET server_version = MAX(COALESCE(server_version, 0), ?) '
+              'WHERE entity_type = ? AND entity_id = ?',
+              [version, entityType, entityId]);
         }
         _refreshRecordStatus(entityType, entityId);
       }
@@ -233,12 +213,66 @@ final class LocalStore {
 
   /// Changes the server may or may not have. The engine asks the server about these first.
   List<OutboxEntry> awaitingConfirmation({int limit = 500}) => [
-    for (final row in _db.select(
-      'SELECT * FROM sf_outbox WHERE status = ? ORDER BY rowid LIMIT ?',
-      [SyncStatus.sentUnconfirmed.name, limit],
-    ))
-      _toEntry(row),
-  ];
+        for (final row in _db.select(
+            'SELECT * FROM sf_outbox WHERE status = ? ORDER BY rowid LIMIT ?',
+            [SyncStatus.sentUnconfirmed.name, limit]))
+          _toEntry(row),
+      ];
+
+  // ─────────────────────── Download: the pull side ───────────────────────
+
+  /// Where the last download stopped. 0 means "never downloaded".
+  int pullCursor() {
+    final rows = _db.select("SELECT value FROM sf_meta WHERE key = 'pull_cursor'");
+    return rows.isEmpty ? 0 : int.parse(rows.first['value'] as String);
+  }
+
+  /// Applies records downloaded from the server and remembers [cursor], all or
+  /// nothing. A record with a local change the server has not confirmed yet is
+  /// left alone: the phone's newer edit wins until it has been sent.
+  int applyRemote(List<PulledRecord> records, {required int cursor}) => _transaction(() {
+        var changed = 0;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        for (final r in records) {
+          final pending = _db.select(
+              'SELECT 1 FROM sf_outbox WHERE entity_type = ? AND entity_id = ? '
+              'AND status <> ? LIMIT 1',
+              [r.entityType, r.entityId, SyncStatus.confirmed.name]);
+          if (pending.isNotEmpty) continue;
+
+          final local = _db.select(
+              'SELECT server_version FROM sf_record WHERE entity_type = ? AND entity_id = ?',
+              [r.entityType, r.entityId]);
+          final localVersion =
+              local.isEmpty ? 0 : (local.first['server_version'] as int?) ?? 0;
+          if (r.version <= localVersion) continue;
+
+          _db.execute('''
+            INSERT INTO sf_record (entity_type, entity_id, payload, deleted, local_seq,
+                                   server_version, sync_status, saved_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+            ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+              payload = excluded.payload,
+              deleted = excluded.deleted,
+              server_version = excluded.server_version,
+              sync_status = excluded.sync_status,
+              saved_at = excluded.saved_at''', [
+            r.entityType,
+            r.entityId,
+            r.deleted || r.payload == null ? null : canonicalJson(r.payload!),
+            r.deleted ? 1 : 0,
+            r.version,
+            SyncStatus.confirmed.name,
+            now,
+          ]);
+          changed++;
+        }
+        _db.execute(
+            "INSERT INTO sf_meta (key, value) VALUES ('pull_cursor', ?) "
+            'ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+            ['$cursor']);
+        return changed;
+      });
 
   void close() => _db.dispose();
 
@@ -283,32 +317,24 @@ final class LocalStore {
     final rows = db.select("SELECT value FROM sf_meta WHERE key = 'client_id'");
     if (rows.isNotEmpty) return rows.first['value'] as String;
     final id = newUuidV7();
-    db.execute("INSERT INTO sf_meta (key, value) VALUES ('client_id', ?)", [
-      id,
-    ]);
+    db.execute("INSERT INTO sf_meta (key, value) VALUES ('client_id', ?)", [id]);
     return id;
   }
 
-  /// After a crash, nothing is really "sending" anymore. Each of those changes
-  /// may or may not have reached the server, so it becomes sentUnconfirmed:
-  /// we will ASK the server later instead of guessing.
   void _recoverAfterRestart() {
     final next = _next(SyncStatus.sending, SyncEvent.appRestarted);
-    _db.execute('UPDATE sf_outbox SET status = ? WHERE status = ?', [
-      next.name,
-      SyncStatus.sending.name,
-    ]);
+    _db.execute('UPDATE sf_outbox SET status = ? WHERE status = ?',
+        [next.name, SyncStatus.sending.name]);
     _refreshAllRecordStatuses();
   }
 
   void _validate(String entityType, Map<String, Object?> payload) {
     final validator = _validators[entityType];
-    if (validator == null) return; // no rules for this type
+    if (validator == null) return;
     final problems = validator(payload);
     if (problems.isNotEmpty) throw ValidationException(entityType, problems);
   }
 
-  /// Runs [body] as one transaction: everything is saved, or nothing is.
   T _transaction<T>(T Function() body) {
     _db.execute('BEGIN IMMEDIATE');
     try {
@@ -321,73 +347,62 @@ final class LocalStore {
     }
   }
 
-  /// Writes the record AND its outbox entry. Must run inside _transaction.
-  LocalRecord _write(
-    String entityType,
-    String entityId,
-    Map<String, Object?> payload, {
-    required bool deleting,
-  }) {
+  LocalRecord _write(String entityType, String entityId, Map<String, Object?> payload,
+      {required bool deleting}) {
     final canonical = canonicalJson(payload);
     final hash = sha256Hex(canonical);
     final now = DateTime.now().millisecondsSinceEpoch;
 
     final existing = _db.select(
-      'SELECT local_seq, deleted FROM sf_record WHERE entity_type = ? AND entity_id = ?',
-      [entityType, entityId],
-    );
+        'SELECT local_seq, deleted FROM sf_record WHERE entity_type = ? AND entity_id = ?',
+        [entityType, entityId]);
 
     final int seq;
     final String opType;
     if (existing.isEmpty) {
       if (deleting) {
-        throw StateError(
-          'Cannot delete $entityType/$entityId: it does not exist',
-        );
+        throw StateError('Cannot delete $entityType/$entityId: it does not exist');
       }
       seq = 1;
       opType = 'create';
       _db.execute(
-        'INSERT INTO sf_record (entity_type, entity_id, payload, deleted, '
-        'local_seq, sync_status, saved_at) VALUES (?, ?, ?, 0, 1, ?, ?)',
-        [entityType, entityId, canonical, SyncStatus.queued.name, now],
-      );
+          'INSERT INTO sf_record (entity_type, entity_id, payload, deleted, '
+          'local_seq, sync_status, saved_at) VALUES (?, ?, ?, 0, 1, ?, ?)',
+          [entityType, entityId, canonical, SyncStatus.queued.name, now]);
     } else {
       seq = (existing.first['local_seq'] as int) + 1;
       final wasDeleted = existing.first['deleted'] == 1;
       opType = deleting ? 'delete' : (wasDeleted ? 'create' : 'update');
       _db.execute(
-        'UPDATE sf_record SET payload = ?, deleted = ?, local_seq = ?, '
-        'sync_status = ?, saved_at = ? WHERE entity_type = ? AND entity_id = ?',
-        [
-          deleting ? null : canonical,
-          deleting ? 1 : 0,
-          seq,
-          SyncStatus.queued.name,
-          now,
-          entityType,
-          entityId,
-        ],
-      );
+          'UPDATE sf_record SET payload = ?, deleted = ?, local_seq = ?, '
+          'sync_status = ?, saved_at = ? WHERE entity_type = ? AND entity_id = ?',
+          [
+            deleting ? null : canonical,
+            deleting ? 1 : 0,
+            seq,
+            SyncStatus.queued.name,
+            now,
+            entityType,
+            entityId,
+          ]);
     }
 
     _db.execute(
-      'INSERT INTO sf_outbox (op_id, entity_type, entity_id, seq, op_type, '
-      'payload, payload_hash, status, next_attempt_at, created_at) '
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [
-        newUuidV7(),
-        entityType,
-        entityId,
-        seq,
-        opType,
-        canonical,
-        hash,
-        SyncStatus.queued.name,
-        now,
-        now,
-      ],
-    );
+        'INSERT INTO sf_outbox (op_id, entity_type, entity_id, seq, op_type, '
+        'payload, payload_hash, status, next_attempt_at, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          newUuidV7(),
+          entityType,
+          entityId,
+          seq,
+          opType,
+          canonical,
+          hash,
+          SyncStatus.queued.name,
+          now,
+          now,
+        ]);
 
     _refreshRecordStatus(entityType, entityId);
     return get(entityType, entityId, includeDeleted: true)!;
@@ -409,8 +424,7 @@ final class LocalStore {
     );
   }
 
-  OutboxEntry _toEntry(Row row, {SyncStatus? status, int? attempts}) =>
-      OutboxEntry(
+  OutboxEntry _toEntry(Row row, {SyncStatus? status, int? attempts}) => OutboxEntry(
         opId: row['op_id'] as String,
         entityType: row['entity_type'] as String,
         entityId: row['entity_id'] as String,
@@ -422,13 +436,10 @@ final class LocalStore {
         attempts: attempts ?? (row['attempts'] as int?) ?? 0,
       );
 
-  /// Asks the state machine where [event] leads from [from]. Never guesses.
   SyncStatus _next(SyncStatus from, SyncEvent event) =>
       transition(from, event) ??
       (throw StateError('No rule for ${from.name} + ${event.name}'));
 
-  /// A record shows the status of its OLDEST change that is not confirmed yet,
-  /// or `confirmed` when every change is.
   static const _recordStatusSql = '''
     UPDATE sf_record SET sync_status = COALESCE(
       (SELECT o.status FROM sf_outbox o
@@ -438,16 +449,10 @@ final class LocalStore {
        ORDER BY o.seq LIMIT 1),
       ?)''';
 
-  void _refreshRecordStatus(String entityType, String entityId) =>
-      _db.execute('$_recordStatusSql WHERE entity_type = ? AND entity_id = ?', [
-        SyncStatus.confirmed.name,
-        SyncStatus.confirmed.name,
-        entityType,
-        entityId,
-      ]);
+  void _refreshRecordStatus(String entityType, String entityId) => _db.execute(
+      '$_recordStatusSql WHERE entity_type = ? AND entity_id = ?',
+      [SyncStatus.confirmed.name, SyncStatus.confirmed.name, entityType, entityId]);
 
-  void _refreshAllRecordStatuses() => _db.execute(_recordStatusSql, [
-    SyncStatus.confirmed.name,
-    SyncStatus.confirmed.name,
-  ]);
+  void _refreshAllRecordStatuses() => _db.execute(
+      _recordStatusSql, [SyncStatus.confirmed.name, SyncStatus.confirmed.name]);
 }

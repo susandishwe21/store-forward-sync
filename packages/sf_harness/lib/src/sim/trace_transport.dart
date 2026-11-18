@@ -55,17 +55,11 @@ final class TraceTransport implements SyncTransport {
 
   @override
   Future<List<PushReply>> push(String clientId, List<PushOp> ops) async {
-    final bytes = ops.fold<int>(
-      0,
-      (sum, op) => sum + canonicalJson(op.payload).length + 120,
-    );
+    final bytes = ops.fold<int>(0, (sum, op) => sum + canonicalJson(op.payload).length + 120);
     late List<PushReply> replies;
-    _travel(
-      bytes,
-      serverWork: () {
-        replies = [for (final op in ops) server.receive(clientId, op)];
-      },
-    );
+    _travel(bytes, serverWork: () {
+      replies = [for (final op in ops) server.receive(clientId, op)];
+    });
     return replies;
   }
 
@@ -74,12 +68,16 @@ final class TraceTransport implements SyncTransport {
     _travel(60 + opIds.length * 40);
     return [
       for (final id in opIds)
-        StatusReply(
-          id,
-          applied: server.status(clientId, id) != null,
-          serverVersion: server.status(clientId, id)?.serverVersion,
-        ),
+        StatusReply(id,
+            applied: server.status(clientId, id) != null,
+            serverVersion: server.status(clientId, id)?.serverVersion),
     ];
+  }
+
+  @override
+  Future<PullReply> pull(String clientId, {required int since, required int limit}) async {
+    _travel(80);
+    return server.pull(since: since, limit: limit);
   }
 
   @override

@@ -11,6 +11,7 @@ import 'send_failure.dart';
 abstract interface class SyncTransport {
   Future<List<PushReply>> push(String clientId, List<PushOp> ops);
   Future<List<StatusReply>> status(String clientId, List<String> opIds);
+  Future<PullReply> pull(String clientId, {required int since, required int limit});
   void close();
 }
 
@@ -34,16 +35,12 @@ final class HttpTransport implements SyncTransport {
       'clientId': clientId,
       'ops': [for (final op in ops) op.toJson()],
     });
-    final replies = _read(
-      () => [
-        for (final r in json['replies'] as List)
-          PushReply.fromJson((r as Map).cast<String, Object?>()),
-      ],
-    );
+    final replies = _read(() => [
+          for (final r in json['replies'] as List)
+            PushReply.fromJson((r as Map).cast<String, Object?>()),
+        ]);
     if (replies.length != ops.length) {
-      throw DeliveryUnknown(
-        'expected ${ops.length} replies, got ${replies.length}',
-      );
+      throw DeliveryUnknown('expected ${ops.length} replies, got ${replies.length}');
     }
     return replies;
   }
@@ -55,24 +52,24 @@ final class HttpTransport implements SyncTransport {
       'clientId': clientId,
       'opIds': opIds,
     });
-    return _read(
-      () => [
-        for (final s in json['statuses'] as List)
-          StatusReply.fromJson((s as Map).cast<String, Object?>()),
-      ],
-    );
+    return _read(() => [
+          for (final s in json['statuses'] as List)
+            StatusReply.fromJson((s as Map).cast<String, Object?>()),
+        ]);
+  }
+
+  @override
+  Future<PullReply> pull(String clientId, {required int since, required int limit}) async {
+    final json = await _post('/sync/pull',
+        {'sfsp': sfspVersion, 'clientId': clientId, 'since': since, 'limit': limit});
+    return _read(() => PullReply.fromJson(json));
   }
 
   @override
   void close() => _client.close(force: true);
 
-  Future<Map<String, Object?>> _post(
-    String path,
-    Map<String, Object?> body,
-  ) async {
-    final bytes = utf8.encode(
-      jsonEncode(body),
-    ); // prepare BEFORE touching the network
+  Future<Map<String, Object?>> _post(String path, Map<String, Object?> body) async {
+    final bytes = utf8.encode(jsonEncode(body)); // prepare BEFORE touching the network
 
     // Phase 1: connect. If this fails, not a single byte reached the server.
     final HttpClientRequest request;

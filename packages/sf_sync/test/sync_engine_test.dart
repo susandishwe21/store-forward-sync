@@ -50,6 +50,10 @@ final class FakeTransport implements SyncTransport {
 
   @override
   void close() {}
+
+  @override
+  Future<PullReply> pull(String clientId, {required int since, required int limit}) async =>
+      server.pull(since: since, limit: limit);
 }
 
 void main() {
