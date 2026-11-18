@@ -45,3 +45,4 @@ __pycache__/
 key.properties
 **/config/*.json
 !**/config/*.example.json
+!**/config/*.example.json
